@@ -1,0 +1,7 @@
+{
+    "revenue": "Calculated as sum of (Products.price * Order_Items.quantity).",
+    "profit": "Calculated as (revenue - (cost * quantity)), where cost is assumed to be 70% of price.",
+    "vip_customer": "A customer who has spent over $1000 in total.",
+    "churned_customer": "A customer whose last order was more than 30 days ago.",
+    "active_product": "A product that has been ordered at least once in the last 30 days."
+}
