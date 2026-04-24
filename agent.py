@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
 from typing import Annotated, TypedDict
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -16,50 +17,72 @@ load_dotenv()
 class State(TypedDict):
     messages: Annotated[list, add_messages]
 
-# 2. Initialize the LLM
-def get_llm(provider_override=None):
+# 2. Define the tools
+tools = [list_tables, get_schema, execute_query, get_business_rule]
+
+# 3. Cache for LLM instances to avoid re-initialization on every call
+_llm_cache = {}
+
+# 4. Initialize the LLM
+def get_llm(provider: str):
     """
-    Initializes and returns the model based on the MODEL_PROVIDER.
+    Initializes and returns the model based on the given provider.
     Supports GROQ, HUGGINGFACE, OPENROUTER, and OLLAMA.
     Sets temperature to 0 to ensure deterministic output for SQL generation.
-    """
-    # Use the override if provided, otherwise fallback to env var
-    provider = provider_override or os.getenv("MODEL_PROVIDER", "OLLAMA (local)")
-    
+    """    
+    # Determine the model name
     if provider == "GROQ":
-        return ChatGroq(
-            model=os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile"),
+        model_name = os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile")
+    elif provider == "HUGGINGFACE":
+        model_name = os.getenv("HUGGINGFACE_MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+    elif provider == "OPENROUTER":
+        model_name = os.getenv("OPENROUTER_MODEL_NAME", "openai/gpt-oss-120b:free")
+    else:
+        model_name = os.getenv("OLLAMA_MODEL_NAME", "qwen3.5:9b")
+
+    # Create a cache key
+    cache_key = f"{provider}:{model_name}"
+
+    # Return cached LLM if it exists
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
+    
+    # If LLM is not in cache, initialize it and store in cache
+    print(f"\n--- [AGENT LOG] Initializing LLM for: {cache_key} ---")
+
+    if provider == "GROQ":
+        llm = ChatGroq(
+            model=model_name,
             api_key=os.getenv("GROQ_API_KEY"),
             temperature=0
         )
     elif provider == "HUGGINGFACE":
-        return ChatOpenAI(
-            model=os.getenv("HUGGINGFACE_MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
+        llm = ChatOpenAI(
+            model=model_name,
             openai_api_key=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
             base_url=os.getenv("HUGGINGFACE_BASE_URL", "https://router.huggingface.co/v1"),
             temperature=0
         )
     elif provider == "OPENROUTER":
-        return ChatOpenAI(
-            model=os.getenv("OPENROUTER_MODEL_NAME", "openai/gpt-oss-120b:free"),
+        llm = ChatOpenAI(
+            model=model_name,
             openai_api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             temperature=0
         )
     else:
-        return ChatOllama(
-            model=os.getenv("OLLAMA_MODEL_NAME", "qwen3.5:9b"),
+        llm = ChatOllama(
+            model=model_name,
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=0
         )
 
-llm = get_llm()
+    # Store LLM in cache
+    _llm_cache[cache_key] = llm
 
-# 3. Bind tools
-tools = [list_tables, get_schema, execute_query, get_business_rule]
-llm_with_tools = llm.bind_tools(tools)
+    return llm
 
-# 4. Define the system prompt
+# 5. Define the system prompt
 SYSTEM_PROMPT = """
     ### ROLE
     You are a Data Analyst with READ-ONLY access to an e-commerce SQLite database.
@@ -77,14 +100,22 @@ SYSTEM_PROMPT = """
     4. Correct the query and execute again.
 """
 
-# 5. Define the reasoning engine
-def call_model(state: State):
+# 6. Define the reasoning engine
+def call_model(state: State, config: RunnableConfig):
     """Processes the current conversation state and determines the next action."""
+    configurable = config.get("configurable", {})
+    provider = configurable.get("provider", os.getenv("MODEL_PROVIDER", "OLLAMA (local)"))
+    
+    # Initialize the LLM dynamically based on the current user selection
+    llm = get_llm(provider)
+    # Bind the tools to the LLM
+    llm_with_tools = llm.bind_tools(tools)
+    
     messages = [("system", SYSTEM_PROMPT)] + state["messages"]
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
-# 6. Build the workflow
+# 7. Build the workflow
 workflow = StateGraph(State)
 
 # Define the nodes for reasoning and action
@@ -110,5 +141,5 @@ workflow.add_conditional_edges("agent", should_continue)
 # Return tool results to the agent for analysis
 workflow.add_edge("tools", "agent")
 
-# 7. Compile the workflow
+# 8. Compile the workflow
 app = workflow.compile()

@@ -7,7 +7,7 @@ from agent import app
 
 # Load environment variables
 load_dotenv()
-    
+
 def get_table_columns(table_name):
     """
     Fetches the column names for a specified table using SQLite PRAGMA.
@@ -41,28 +41,23 @@ st.set_page_config(page_title="SQL Agent", page_icon="📊")
 # Initialize session state
 if "provider" not in st.session_state:
     env_provider = os.getenv("MODEL_PROVIDER", "OLLAMA (local)")
-    if env_provider == "OLLAMA (local)":
-        st.session_state.provider = "OLLAMA (local)"
-    else:
-        st.session_state.provider = env_provider
+    st.session_state.provider = env_provider
 
 # Define the callback function
 def on_provider_change():
     # Update the state immediately when the user clicks
-    st.session_state.provider = st.session_state.provider_select
-    # Update the environment variable so the agent's os.getenv() sees it
-    os.environ["MODEL_PROVIDER"] = st.session_state.provider_select
+    st.session_state.provider = st.session_state.provider_selected
 
 with st.sidebar:
     st.header("Settings")
 
     # Selectbox for the user to switch providers
-    available_providers = ["GROQ", "HUGGINGFACE", "OPENROUTER", "OLLAMA (local)"]
+    available_providers = os.getenv("AVAILABLE_MODEL_PROVIDERS", "OLLAMA (local)").split(",")
     st.selectbox(
         "Model Provider",
         options=available_providers,
         index=available_providers.index(st.session_state.provider),
-        key="provider_select",
+        key="provider_selected",
         on_change=on_provider_change
     )
     provider = st.session_state.provider
@@ -113,7 +108,9 @@ for message in st.session_state.messages:
 
 # User input
 if prompt := st.chat_input("Ask me anything about the e-commerce data"):
+    # Persist the user's prompt to the session history
     st.session_state.messages.append({"role": "user", "content": prompt})
+
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -121,8 +118,23 @@ if prompt := st.chat_input("Ask me anything about the e-commerce data"):
         message_placeholder = st.empty()
         
         with st.spinner("Thinking and Querying Database..."):
-            inputs = {"messages": [("user", prompt)]}
-            result = app.invoke(inputs, config={"recursion_limit": 25,"configurable": {"provider": st.session_state.provider}})
+            print(f"\n--- [UI LOG] User sending request via: {st.session_state.provider} ---")
+            
+            # Send the last N messages to the agent for context (including the current user prompt)
+            MAX_CONTEXT_MESSAGES = int(os.getenv("MAX_CONTEXT_MESSAGES", 1))
+            history = st.session_state.messages[-MAX_CONTEXT_MESSAGES:]
+
+            print("\n--- [UI LOG] Input to Agent ---")
+            messages = []
+            for msg in history:
+                role = msg["role"]
+                content = msg["content"]
+                messages.append((role, content))
+                print(f"  {role.capitalize()}: {content}")
+            
+            inputs = {"messages": messages}
+            config = {"recursion_limit": int(os.getenv("RECURSION_LIMIT", 25)), "configurable": {"provider": st.session_state.provider}}
+            result = app.invoke(inputs, config=config)
 
             with st.expander("🔍 Show Agent Thought Process"):
                 # Skip the first message (the user prompt) and the last (final answer)
@@ -149,8 +161,8 @@ if prompt := st.chat_input("Ask me anything about the e-commerce data"):
             final_message = result["messages"][-1]
             full_response = final_message.content
             
-            # Display the final response
-            message_placeholder.markdown(full_response)
+        # Display the final response
+        message_placeholder.markdown(full_response)
     
     # Persist the assistant's response to the session history
     st.session_state.messages.append({"role": "assistant", "content": full_response})
